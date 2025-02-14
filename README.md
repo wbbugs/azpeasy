@@ -16,7 +16,7 @@ Once the access token is collected and stored it will run the following checks:
 - User can invite guests
 
 ##  Why?
-When do engagements you often gathere credentials and have to login and check individual areas one by one. I wanted a tool to quickly check all potentail areas and output a response based on what was vulnerable.
+When doing engagements you often gather credentials and have to login and check individual privilege escalation areas one by one. I wanted a tool to quickly check all potential areas and output a response based on what was vulnerable.
 
 
 ##  Features
