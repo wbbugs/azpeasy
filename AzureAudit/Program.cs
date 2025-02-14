@@ -1,9 +1,11 @@
 ﻿using System;
 using System.IdentityModel.Tokens.Jwt;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Identity.Client;
 
@@ -192,43 +194,83 @@ namespace TokenManagement
     // Current working on implementing GraphAPI calls HERE
     public static class GraphApiHelper
     {
+        // Add rate limiting parameters
+        private static readonly SemaphoreSlim _throttler = new SemaphoreSlim(1);
+        private static readonly TimeSpan _throttleDelay = TimeSpan.FromSeconds(2); // Delay between requests
+        private static DateTime _lastRequestTime = DateTime.MinValue;
+
+        private static async Task ThrottleRequestAsync()
+        {
+            await _throttler.WaitAsync();
+            try
+            {
+                var timeSinceLastRequest = DateTime.UtcNow - _lastRequestTime;
+                if (timeSinceLastRequest < _throttleDelay)
+                {
+                    await Task.Delay(_throttleDelay - timeSinceLastRequest);
+                }
+                _lastRequestTime = DateTime.UtcNow;
+            }
+            finally
+            {
+                _throttler.Release();
+            }
+        }
+
         public static async Task FetchGraphAppDataAsync(string accessToken)
         {
             using (HttpClient client = new HttpClient())
-            { 
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-            string graphEndpoint = "https://graph.microsoft.com/v1.0/policies/authorizationPolicy";
-            HttpResponseMessage response = await client.GetAsync(graphEndpoint);
-
-            if (response.IsSuccessStatusCode)
             {
-                string jsonResponse = await response.Content.ReadAsStringAsync();
-                using (JsonDocument doc = JsonDocument.Parse(jsonResponse))
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                string graphEndpoint = "https://graph.microsoft.com/v1.0/policies/authorizationPolicy";
+
+                // Add retry logic with exponential backoff
+                int maxRetries = 3;
+                for (int i = 1; i <= maxRetries; i++)
                 {
-                    JsonElement root = doc.RootElement;
+                    await ThrottleRequestAsync(); // Throttle before making request
 
-                    Console.WriteLine("\nMicrosoft App Registration Policy:");
-                    Console.WriteLine(new string('═', 60));
+                    HttpResponseMessage response = await client.GetAsync(graphEndpoint);
 
-                    if (root.TryGetProperty("defaultUserRolePermissions", out JsonElement permissions))
+                    if (response.IsSuccessStatusCode)
                     {
-                        PrintPolicyDetails(permissions);
+                        string jsonResponse = await response.Content.ReadAsStringAsync();
+                        using (JsonDocument doc = JsonDocument.Parse(jsonResponse))
+                        {
+                            JsonElement root = doc.RootElement;
+
+                            Console.WriteLine("\nMicrosoft App Registration Policy:");
+                            Console.WriteLine(new string('═', 60));
+
+                            if (root.TryGetProperty("defaultUserRolePermissions", out JsonElement permissions))
+                            {
+                                PrintPolicyDetails(permissions);
+                            }
+                            else
+                            {
+                                Console.WriteLine("No policy details found.");
+                            }
+                        }
+                        break; // Success, exit retry loop
                     }
-                    else
+                    else if (response.StatusCode == (HttpStatusCode)429) // 429
                     {
-                        Console.WriteLine("No policy details found.");
+                        if (i < maxRetries)
+                        {
+                            // Get retry-after header if available, otherwise use exponential backoff
+                            var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Pow(2, i));
+                            Console.WriteLine($"Rate limited. Waiting {retryAfter.TotalSeconds} seconds before retry {i}/{maxRetries}...");
+                            await Task.Delay(retryAfter);
+                            continue;
+                        }
                     }
+
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"\nError fetching user data: {response.StatusCode}");
+                    Console.ResetColor();
                 }
             }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\nError fetching user data: {response.StatusCode}");
-                Console.ResetColor();
-            }
         }
-    }
 
         private static void PrintPolicyDetails(JsonElement permissions)
         {
@@ -259,12 +301,14 @@ namespace TokenManagement
         // **Guest Invite Check Added Here**
         public static async Task CheckUserGuestInvitePermissionsAsync(string accessToken, string userId)
         {
-            using (HttpClient client = new HttpClient()) 
+            using (HttpClient client = new HttpClient())
             {
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 
                 try
                 {
+                    await ThrottleRequestAsync(); // Throttle before making request
+
                     HttpResponseMessage response = await client.GetAsync($"https://graph.microsoft.com/v1.0/users/{userId}/memberOf");
                     if (!response.IsSuccessStatusCode)
                     {
@@ -286,7 +330,7 @@ namespace TokenManagement
                     } 
 
                     bool canInvite = false;
-                    foreach (JsonElement role in rolesElement.EnumerateArray())
+                    foreach (JsonElement role in rolesElement.EnumerateArray()) 
                     {
                         if (role.TryGetProperty("roleTemplateId", out JsonElement roleId))
                         {
